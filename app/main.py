@@ -5,7 +5,16 @@ import logging
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
-from openai.types.chat import ChatCompletionMessageFunctionToolCall
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionUserMessageParam,
+)
+from openai.types.chat.chat_completion_message_function_tool_call_param import (
+    ChatCompletionMessageFunctionToolCallParam,
+    Function,
+)
 
 load_dotenv()
 
@@ -28,79 +37,113 @@ def main():
 
     client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-    chat = client.chat.completions.create(
-        model="anthropic/claude-haiku-4.5",
-        # model="openrouter/free",
-        messages=[{"role": "user", "content": args.p}],
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "Read",
-                    "description": "Read and return the contents of a file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "The path to the file to read",
-                            }
+    initial_user_message = ChatCompletionUserMessageParam(role="user", content=args.p)
+    conversation_history: list[ChatCompletionMessageParam] = [initial_user_message]
+    while True:
+        chat = client.chat.completions.create(
+            model="anthropic/claude-haiku-4.5",
+            # model="openrouter/free",
+            messages=conversation_history,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "Read",
+                        "description": "Read and return the contents of a file",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "The path to the file to read",
+                                }
+                            },
+                            "required": ["file_path"],
                         },
-                        "required": ["file_path"],
                     },
-                },
-            }
-        ],
-    )
+                }
+            ],
+        )
 
-    if not chat.choices:
-        logger.error("no choices in response")
-        return
+        if not chat.choices:
+            logger.error("no choices in response")
+            return
 
-    message = chat.choices[0].message
-    tool_calls = message.tool_calls
-    content = message.content
-    if content:
-        print(content)
-    if not tool_calls:
-        return
-    for tool_call in tool_calls:
-        if tool_call.type == "function":
-            function_name = tool_call.function.name
-            if function_name == "Read":
-                execute_read_tool(tool_call)
+        message = chat.choices[0].message
+        tool_calls = message.tool_calls
+        content = message.content
+        assistant_message = ChatCompletionAssistantMessageParam(
+            role="assistant",
+            content=content,
+        )
+        if not tool_calls:
+            if content:
+                print(content)
+            return
+        assistant_message["tool_calls"] = []
+        tool_messages = []
+        for tool_call in tool_calls:
+            if tool_call.type == "function":
+                tool_call_id = tool_call.id
+                function_name = tool_call.function.name
+                arguments = tool_call.function.arguments
+                assistant_message["tool_calls"].append(
+                    ChatCompletionMessageFunctionToolCallParam(
+                        id=tool_call.id,
+                        type=tool_call.type,
+                        function=Function(name=function_name, arguments=arguments),
+                    )
+                )
+                if function_name == "Read":
+                    tool_response = execute_read_tool(arguments)
+                else:
+                    tool_response = f"Unknown tool: {function_name}"
+                tool_messages.append(
+                    ChatCompletionToolMessageParam(
+                        role="tool",
+                        tool_call_id=tool_call_id,
+                        content=tool_response,
+                    )
+                )
+        conversation_history.append(assistant_message)
+        conversation_history.extend(tool_messages)
 
 
-def execute_read_tool(tool_call: ChatCompletionMessageFunctionToolCall):
+def execute_read_tool(arguments: str) -> str:
     try:
-        arguments = json.loads(tool_call.function.arguments)
+        arguments = json.loads(arguments)
     except json.JSONDecodeError:
-        logger.error("Invalid JSON in arguments")
-        return
+        logger.error(error := "Invalid JSON in arguments")
+        return error
     if not isinstance(arguments, dict):
-        return
+        logger.error(error := "Arguments in response not in dict format")
+        return error
     file_path = arguments.get("file_path")
     if not file_path:
-        return
+        logger.error(error := f"Argument missing in response: {file_path}")
+        return error
     if not file_path or not isinstance(file_path, str):
-        logger.error("Missing or invalid file_path")
-        return
+        logger.error(error := "Missing or invalid file_path")
+        return error
     try:
         requested_path = (SAFE_DIR / file_path).resolve()
         requested_path.relative_to(SAFE_DIR)
         if not requested_path.is_file():
-            logger.error(f"Not a file: {file_path}")
-            return
+            logger.error(error := f"Not a file: {file_path}")
+            return error
 
         content = requested_path.read_text(encoding="utf-8")
-        print(content)
+        return content
 
     except ValueError:
-        logger.error(f"Path outside allowed directory: {file_path}")
+        logger.error(error := f"Path outside allowed directory: {file_path}")
+        return error
     except PermissionError:
-        logger.error(f"Permission denied: {file_path}")
+        logger.error(error := f"Permission denied: {file_path}")
+        return error
     except Exception as e:
-        logger.error(f"Error reading file: {e}")
+        logger.error(error := f"Error reading file: {e}")
+        return error
 
 
 if __name__ == "__main__":
