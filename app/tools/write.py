@@ -25,7 +25,7 @@ def execute_write_tool(
         return format_error_response(error)
     content = arguments.get("content")
     if not content:
-        logger.error(error := "content argument missing in response")
+        logger.error(error := "Content argument missing in response")
         return format_error_response(error)
     if not isinstance(content, str):
         logger.error(error := "Invalid content argument")

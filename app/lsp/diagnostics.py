@@ -4,7 +4,6 @@ import subprocess
 import select
 import time
 import logging
-from venv import logger
 
 logger = logging.getLogger(__name__)
 

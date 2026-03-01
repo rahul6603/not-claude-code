@@ -1,6 +1,7 @@
-from openai import OpenAI
+from openai import AsyncOpenAI
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, TextArea
+from textual.widgets import Static, TextArea
+from textual.containers import VerticalScroll
 from rich.markdown import Markdown
 from textual.binding import Binding
 from textual.message import Message
@@ -34,71 +35,112 @@ class ChatApp(App[None]):
     ChatArea {
         dock: bottom;
         height: 5;
+        border: tall $border !important;
     }
-    RichLog {
+    VerticalScroll {
         height: 1fr;
-        border: solid green;
+    }
+    .user-message {
+        border: solid $border;
+        margin-bottom: 1;
+        padding: 0 1;
+    }
+    .streaming-text {
+        margin-bottom: 1;
+        padding: 0 1;
     }
     """
 
     def __init__(self):
         super().__init__()
         self.agent: Agent | None = None
+        self._streaming_widget: Static | None = None
+        self._streaming_content: str = ""
+        self._first_message: bool = True
 
     def compose(self) -> ComposeResult:
-        yield RichLog(highlight=True, markup=True, wrap=True)
+        yield VerticalScroll()
         yield ChatArea(placeholder="How can I help you today?")
 
     def on_mount(self) -> None:
         if not API_KEY:
-            self.query_one(RichLog).write(
-                "[bold red]Error:[/bold red] OpenRouter API key is not set"
+            scroll = self.query_one(VerticalScroll)
+            scroll.mount(
+                Static("[bold red]Error:[/bold red] OpenRouter API key is not set")
             )
             self.query_one(ChatArea).disabled = True
             return
-        client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-        self.agent = Agent(client, self.handle_error, self.display_message)
+        client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
+        self.agent = Agent(
+            client,
+            self.handle_error,
+            self.stream_token,
+            self.finish_message,
+        )
         self.query_one(ChatArea).focus()
 
     def on_chat_area_submitted(self, event: ChatArea.Submitted) -> None:
         if not self.agent:
-            self.handle_error(
-                "[bold red]Error: Could not initialize the OpenRouter client, try again[/bold red]"
-            )
+            self.handle_error("Could not initialize the OpenRouter client, try again")
             return
 
         user_input = event.value.strip()
         if not user_input:
             return
 
-        self.query_one(ChatArea).text = ""
-        self.query_one(ChatArea).disabled = True
+        chat_area = self.query_one(ChatArea)
+        chat_area.text = ""
+        chat_area.disabled = True
 
-        log = self.query_one(RichLog)
-        log.write(f"[bold green]User[/bold green]\n{user_input}")
+        if self._first_message:
+            chat_area.placeholder = ""
+            self._first_message = False
+
+        scroll = self.query_one(VerticalScroll)
+        scroll.mount(Static(user_input, classes="user-message"))
 
         self.agent.add_user_message(user_input)
         self.process_response()
+
+    def _start_streaming(self) -> None:
+        self._streaming_content = ""
+        self._streaming_widget = Static("", classes="streaming-text")
+        scroll = self.query_one(VerticalScroll)
+        scroll.mount(self._streaming_widget)
+        scroll.scroll_end(animate=False)
+
+    def stream_token(self, token: str) -> None:
+        if self._streaming_widget is None:
+            self._start_streaming()
+        self._streaming_content += token
+        if self._streaming_widget is not None:
+            self._streaming_widget.update(self._streaming_content)
+            scroll = self.query_one(VerticalScroll)
+            scroll.scroll_end(animate=False)
+
+    def finish_message(self, full_content: str) -> None:
+        if self._streaming_widget is not None:
+            self._streaming_widget.update(Markdown(full_content))
+            scroll = self.query_one(VerticalScroll)
+            scroll.scroll_end(animate=False)
+        self._streaming_widget = None
+        self._streaming_content = ""
+
+    def handle_error(self, error_msg: str) -> None:
+        scroll = self.query_one(VerticalScroll)
+        scroll.mount(Static(f"[bold red]Error:[/bold red] {error_msg}"))
+        scroll.scroll_end(animate=False)
 
     def enable_input(self) -> None:
         input_widget = self.query_one(ChatArea)
         input_widget.disabled = False
         input_widget.focus()
 
-    def handle_error(self, error_msg: str):
-        log = self.query_one(RichLog)
-        self.call_from_thread(log.write, f"[bold red]Error:[/bold red] {error_msg}")
-
-    def display_message(self, content: str):
-        log = self.query_one(RichLog)
-        self.call_from_thread(log.write, "[bold blue]Assistant[/bold blue]")
-        self.call_from_thread(log.write, Markdown(content))
-
-    @work(thread=True)
-    def process_response(self) -> None:
+    @work
+    async def process_response(self) -> None:
         if not self.agent:
             return
         should_continue = True
         while should_continue:
-            should_continue = self.agent.process_turn()
-        self.call_from_thread(self.enable_input)
+            should_continue = await self.agent.process_turn()
+        self.enable_input()

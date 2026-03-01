@@ -5,14 +5,15 @@ A simple code assistant built to learn about AI agents.
 ## Features
 
 - A minimal TUI
+- Response streaming
 - Tool usage: read/write file and command execution
-- Basic LSP integration
+- Python LSP integration
 - Managing conversation history
 
 ## To be implemented
 
 - Additional tools
-- Streaming responses
+- More language servers
 - Code diff visualization
 - etc.
 
