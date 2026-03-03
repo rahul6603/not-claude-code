@@ -1,6 +1,7 @@
+import logging
 from openai import AsyncOpenAI
 from textual.app import App, ComposeResult
-from textual.widgets import Static, TextArea
+from textual.widgets import LoadingIndicator, Static, TextArea
 from textual.containers import VerticalScroll
 from rich.markdown import Markdown
 from textual.binding import Binding
@@ -9,6 +10,8 @@ from textual import work
 
 from app.core.agent import Agent
 from app.config import API_KEY, BASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 class ChatArea(TextArea):
@@ -32,13 +35,19 @@ class ChatArea(TextArea):
 
 class ChatApp(App[None]):
     CSS = """
+    VerticalScroll {
+        height: 1fr;
+    }
     ChatArea {
-        dock: bottom;
         height: 5;
         border: tall $border !important;
     }
-    VerticalScroll {
-        height: 1fr;
+    LoadingIndicator {
+        height: 1;
+        display: none;
+    }
+    LoadingIndicator.-visible {
+        display: block;
     }
     .user-message {
         border: solid $border;
@@ -61,6 +70,7 @@ class ChatApp(App[None]):
     def compose(self) -> ComposeResult:
         yield VerticalScroll()
         yield ChatArea(placeholder="How can I help you today?")
+        yield LoadingIndicator()
 
     def on_mount(self) -> None:
         if not API_KEY:
@@ -68,6 +78,7 @@ class ChatApp(App[None]):
             scroll.mount(
                 Static("[bold red]Error:[/bold red] OpenRouter API key is not set")
             )
+            logger.error("OpenRouter API key is not set")
             self.query_one(ChatArea).disabled = True
             return
         client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
@@ -99,6 +110,8 @@ class ChatApp(App[None]):
         scroll = self.query_one(VerticalScroll)
         scroll.mount(Static(user_input, classes="user-message"))
 
+        self.query_one(LoadingIndicator).add_class("-visible")
+
         self.agent.add_user_message(user_input)
         self.process_response()
 
@@ -127,11 +140,13 @@ class ChatApp(App[None]):
         self._streaming_content = ""
 
     def handle_error(self, error_msg: str) -> None:
+        self.query_one(LoadingIndicator).remove_class("-visible")
         scroll = self.query_one(VerticalScroll)
         scroll.mount(Static(f"[bold red]Error:[/bold red] {error_msg}"))
         scroll.scroll_end(animate=False)
 
     def enable_input(self) -> None:
+        self.query_one(LoadingIndicator).remove_class("-visible")
         input_widget = self.query_one(ChatArea)
         input_widget.disabled = False
         input_widget.focus()
